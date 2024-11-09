@@ -9,6 +9,7 @@ import requests
 import re
 from raid import check_raid
 import configparser
+from docker import check_docker
 
 
 app = Flask(__name__)
@@ -90,6 +91,15 @@ def process_raid_check(queue, host, label):
         #print(f"RAID result for {host}: {result}")    
 
         time.sleep(120)
+
+
+def process_docker_check(queue, host, image, label):
+    while True:
+        result = check_docker(host, image)
+        queue.put({"type": label, "time": datetime.now(), "result": result})
+        #print(f"Docker result for {host}: {result}")    
+
+        time.sleep(10)
             
 processes = [
     multiprocessing.Process(target=process_ping, args=(event_queue,config.get('IPs','internet'),"ping_internet")),
@@ -101,36 +111,12 @@ processes = [
     multiprocessing.Process(target=process_ping, args=(event_queue,config.get('IPs','server_b'),"ping_server_b")),
     multiprocessing.Process(target=process_http_check, args=(event_queue,"ha.home.internal","ha_request")),
     multiprocessing.Process(target=process_raid_check, args=(event_queue,config.get('IPs','server_a'),"raid_server_a")),
-    multiprocessing.Process(target=process_raid_check, args=(event_queue,config.get('IPs','server_b'),"raid_server_b"))
+    multiprocessing.Process(target=process_raid_check, args=(event_queue,config.get('IPs','server_b'),"raid_server_b")),
+    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_a'),"homeassistant/home-assistant","ha_docker_server_a")),
+    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_a'),"zigbee2mqtt","z2m_docker_server_a")),
+    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_b'),"homeassistant/home-assistant","ha_docker_server_b")),
+    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_docker_server_b"))
 ]
-
-
-# ----------------------------------------------------------------  
-# SSH checks
-# ----------------------------------------------------------------  
-
-
-def get_docker_ps(host):
-    try:
-        output = subprocess.check_output(['ssh', host, 'sudo docker ps'])
-        return output
-    except subprocess.CalledProcessError:
-        return None
-
-def process_docker_check(queue, host, label_ha, label_z2m):
-    while True:
-        docker_output = get_docker_ps(host)
-        for line in docker_output.splitlines():
-            if "homeassistant" in line:
-                queue.put({"type": label, "time": datetime.now(), "result": True})
-                break
-            pass
-
-
-        queue.put({"type": label, "time": datetime.now(), "result": result})
-        time.sleep(10)
-
-
 
 
 # ----------------------------------------------------------------
@@ -252,6 +238,8 @@ if __name__ == '__main__':
                 update_label_with_time('-INFRA_SWITCH_MAIN-', event['time'], 5, 1)
             elif event['type'] == 'ping_garden_switch' and event['result']:
                 update_label_with_time('-INFRA_SWITCH_GARDEN-', event['time'], 5, 1)
+            elif event['type'] == 'ping_backup_switch' and event['result']:
+                update_label_with_time('-INFRA_SWITCH_BACKUP-', event['time'], 5, 1)
             elif event['type'] == 'ping_server_a' and event['result']:
                 update_label_with_time('-A_LASTPING-', event['time'], 5, 1)
             elif event['type'] == 'ping_server_b' and event['result']:
@@ -264,6 +252,14 @@ if __name__ == '__main__':
                 update_label_with_status('-A_RAID-', event['time'], event["result"])
             elif event['type'] == 'raid_server_b':
                 update_label_with_status('-B_RAID-', event['time'], event["result"])
+            elif event['type'] == 'ha_docker_server_a':
+                update_label_with_status('-A_HA_DOCKER-', event['time'], event["result"])
+            elif event['type'] == 'z2m_docker_server_a':
+                update_label_with_status('-A_Z2M_DOCKER-', event['time'], event["result"])
+            elif event['type'] == 'ha_docker_server_b':
+                update_label_with_status('-B_HA_DOCKER-', event['time'], event["result"])
+            elif event['type'] == 'z2m_docker_server_b':
+                update_label_with_status('-B_Z2M_DOCKER-', event['time'], event["result"])
 
         if "ha_http_server_a" in ping_data:
             update_label_with_time('-A_LASTPING_HA-', ping_data['ha_http_server_a'], 5, 1)

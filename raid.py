@@ -24,7 +24,7 @@ def parse_physical_device_smart_status(output):
 def check_raid(host):
     try:
         output = subprocess.check_output(['ssh', host, 'arcconf getconfig 1']).decode("utf-8")
-        print("SSH finished, output is", output)
+        #print("SSH finished, output is", output)
 
         controller_status = parse_controller_status(output)
         logical_device_status = parse_logical_device_status(output)
