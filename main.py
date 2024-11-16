@@ -9,7 +9,10 @@ import requests
 import re
 from raid import check_raid
 import configparser
-from docker import check_docker
+from system_checks import check_docker
+from system_checks import check_mac
+from system_checks import check_docker_logs
+import pytz
 
 
 app = Flask(__name__)
@@ -24,6 +27,8 @@ event_queue = multiprocessing.Queue()
 config = configparser.ConfigParser()
 config.read('config.ini')
 
+localtz = pytz.timezone('Europe/Berlin')
+
 
 # ----------------------------------------------------------------  
 # HTTP endpoints
@@ -34,13 +39,13 @@ flask_thread = Thread(target=app.run, kwargs={'port':18080})
 @app.route('/pingServerA')
 def ping_a():
     global ping_data
-    ping_data["ha_http_server_a"] = datetime.now()
+    ping_data["ha_http_server_a"] = datetime.now().astimezone(localtz)
     return {'message': 'Server A pinged at {}'.format(datetime.now())}
 
 @app.route('/pingServerB')
 def ping_b():
     global ping_data
-    ping_data["ha_http_server_b"] = datetime.now()
+    ping_data["ha_http_server_b"] = datetime.now(localtz)
     return {'message': 'Server B pinged at {}'.format(datetime.now())}
 
 
@@ -72,13 +77,13 @@ def process_ping(queue, host, label):
 
     while True:
         result = ping_host(host)
-        queue.put({"type": label, "time": datetime.now(), "result": result})
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
         time.sleep(10)
 
 def process_http_check(queue, host, label):
     while True:
         result = check_http(host)
-        queue.put({"type": label, "time": datetime.now(), "result": result})
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
         #print(f"HTTP result for {host}: {result}")    
 
         time.sleep(10)
@@ -87,7 +92,7 @@ def process_http_check(queue, host, label):
 def process_raid_check(queue, host, label):
     while True:
         result = check_raid(host)
-        queue.put({"type": label, "time": datetime.now(), "result": result})
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
         #print(f"RAID result for {host}: {result}")    
 
         time.sleep(120)
@@ -96,10 +101,27 @@ def process_raid_check(queue, host, label):
 def process_docker_check(queue, host, image, label):
     while True:
         result = check_docker(host, image)
-        queue.put({"type": label, "time": datetime.now(), "result": result})
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
         #print(f"Docker result for {host}: {result}")    
 
         time.sleep(10)
+
+def process_mac_check(queue, host, primary_mac, secondary_mac, label):
+    while True:
+        result = check_mac(host, primary_mac, secondary_mac)
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
+        #print(f"Docker result for {host}: {result}")    
+
+        time.sleep(5)       
+
+def process_check_logs(queue, host, container, label):
+    while True:
+        result = check_docker_logs(host, container)
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
+        #print(f"Docker logs result for {host}: {result}")    
+
+        time.sleep(30)
+
             
 processes = [
     multiprocessing.Process(target=process_ping, args=(event_queue,config.get('IPs','internet'),"ping_internet")),
@@ -115,7 +137,12 @@ processes = [
     multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_a'),"homeassistant/home-assistant","ha_docker_server_a")),
     multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_a'),"zigbee2mqtt","z2m_docker_server_a")),
     multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_b'),"homeassistant/home-assistant","ha_docker_server_b")),
-    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_docker_server_b"))
+    multiprocessing.Process(target=process_docker_check, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_docker_server_b")),
+    multiprocessing.Process(target=process_mac_check, args=(event_queue,config.get('IPs','cluster_ip'),config.get('IPs','primary_mac'),config.get('IPs','secondary_mac'), "mac_cluster_id")),
+    multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_a'),"homeassistant","ha_logs_server_a")),
+    multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_b'),"homeassistant","ha_logs_server_b")),
+    multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_a'),"zigbee2mqtt","z2m_logs_server_a")),
+    multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_logs_server_b"))
 ]
 
 
@@ -131,6 +158,7 @@ infra_panel = [
     [sg.Text('Garden Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_GARDEN-', size=(20, 1))],
     [sg.Text('Backup Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_BACKUP-', size=(20, 1))],
     [sg.Text('Current HA:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_HA-', size=(20, 1))],
+    [sg.Text('Active server:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_KEEPALIVED-', size=(20, 1))]
 ]
 
 
@@ -196,22 +224,56 @@ window = sg.Window('Cluster Control', layout, size=(1024, 600))
 
 def update_label_with_time(label, time, threshold_red, threshold_yellow):
     if time is not None:
-        time_difference = datetime.now() - time
+        time_difference = datetime.now().astimezone(localtz) - time
         minutes = time_difference.total_seconds() // 60
         if minutes > threshold_red:
-            window[label].update("ERR - " + time.strftime('%H:%M:%S'), background_color='red')
+            window[label].update("ERR - " + time.astimezone(localtz).strftime('%H:%M:%S'), background_color='red')
         elif minutes > threshold_yellow:
-            window[label].update("WARN - " + time.strftime('%H:%M:%S'), background_color='yellow')
+            window[label].update("WARN - " + time.astimezone(localtz).strftime('%H:%M:%S'), background_color='yellow')
         else:
-            window[label].update("OK - " + time.strftime('%H:%M:%S'))
+            window[label].update("OK - " + time.astimezone(localtz).strftime('%H:%M:%S'))
     else:
-        window[label].update('')
+        window[label].update('Missing', background_color='red')
+
+
+def update_label_with_time_docker_b_server(label, time, threshold_red, threshold_yellow):
+    if time is not None:
+        time_difference = datetime.now().astimezone(localtz) - time
+        minutes = time_difference.total_seconds() // 60
+        if minutes > threshold_red:
+            window[label].update("ERR - " + time.astimezone(localtz).strftime('%H:%M:%S'), background_color='red' if current_server == "secondary" else None)
+        elif minutes > threshold_yellow:
+            window[label].update("WARN - " + time.astimezone(localtz).strftime('%H:%M:%S'), background_color='yellow' if current_server == "secondary" else None)
+        else:
+            window[label].update("OK - " + time.astimezone(localtz).strftime('%H:%M:%S'))
+    else:
+        if current_server == "secondary":
+            window[label].update('Missing', background_color='red')
+        else:
+            window[label].update('Missing (but inactive)')
+
 
 def update_label_with_status(label, time, status):
     if status is not None:
         window[label].update(status, background_color='red')
     else:
-        window[label].update('OK - ' + time.strftime('%H:%M:%S'))
+        window[label].update('OK - ' + time.astimezone(localtz).strftime('%H:%M:%S'))
+
+def update_label_with_status_docker(label, time, status):
+    if status is not None:
+        window[label].update(status, background_color='red')
+    else:
+        window[label].update('UP - ' + time.astimezone(localtz).strftime('%H:%M:%S'))
+
+def update_label_with_status_docker_b_server(label, time, status, current_server):
+    if status is not None:
+        if current_server == "secondary":
+            window[label].update(status, background_color='red')
+        else:
+            window[label].update(status + " (but inactive)", background_color=None)
+    else:
+        window[label].update('UP - ' + time.astimezone(localtz).strftime('%H:%M:%S'))
+
 
 if __name__ == '__main__':  
     multiprocessing.freeze_support()
@@ -220,6 +282,8 @@ if __name__ == '__main__':
 
     flask_thread.daemon = True
     flask_thread.start()
+
+    current_server = None
 
     # Event Loop to process "events"
     while True:
@@ -253,18 +317,35 @@ if __name__ == '__main__':
             elif event['type'] == 'raid_server_b':
                 update_label_with_status('-B_RAID-', event['time'], event["result"])
             elif event['type'] == 'ha_docker_server_a':
-                update_label_with_status('-A_HA_DOCKER-', event['time'], event["result"])
+                update_label_with_status_docker('-A_HA_DOCKER-', event['time'], event["result"])
             elif event['type'] == 'z2m_docker_server_a':
-                update_label_with_status('-A_Z2M_DOCKER-', event['time'], event["result"])
+                update_label_with_status_docker('-A_Z2M_DOCKER-', event['time'], event["result"])
             elif event['type'] == 'ha_docker_server_b':
-                update_label_with_status('-B_HA_DOCKER-', event['time'], event["result"])
+                update_label_with_status_docker_b_server('-B_HA_DOCKER-', event['time'], event["result"], current_server)
             elif event['type'] == 'z2m_docker_server_b':
-                update_label_with_status('-B_Z2M_DOCKER-', event['time'], event["result"])
+                update_label_with_status_docker_b_server('-B_Z2M_DOCKER-', event['time'], event["result"], current_server)
+            elif event['type'] == 'mac_cluster_id':
+                current_server = event['result']
+                if event['result'] == "primary":
+                    window['-INFRA_CURRENT_KEEPALIVED-'].update('Primary', background_color=None)
+                elif event['result'] == "secondary":
+                    window['-INFRA_CURRENT_KEEPALIVED-'].update('Secondary', background_color='yellow')
+                else:
+                    window['-INFRA_CURRENT_KEEPALIVED-'].update('Unknown', background_color='red')
+            elif event['type'] == 'ha_logs_server_a':
+                update_label_with_time('-A_LASTMSG_HA-', event['result'], 10, 5)
+            elif event['type'] == 'ha_logs_server_b':
+                update_label_with_time_docker_b_server('-B_LASTMSG_HA-', event['result'], 10, 5)
+            elif event['type'] == 'z2m_logs_server_a':
+                update_label_with_time('-A_LASTMSG_Z2M-', event['result'], 10, 5)
+            elif event['type'] == 'z2m_logs_server_b':
+                update_label_with_time_docker_b_server('-B_LASTMSG_Z2M-', event['result'], 10, 5)
+
 
         if "ha_http_server_a" in ping_data:
             update_label_with_time('-A_LASTPING_HA-', ping_data['ha_http_server_a'], 5, 1)
         if "ha_http_server_b" in ping_data:
-            update_label_with_time('-B_LASTPIN_HA-', ping_data['ha_http_server_b'], 5, 1)
+            update_label_with_time('-B_LASTPING_HA-', ping_data['ha_http_server_b'], 5, 1)
 
 
     print("Closing processes")
