@@ -616,11 +616,12 @@ if __name__ == '__main__':
     window.finalize()
     for k in button_mapping:        
         window.bind(button_mapping[k][0], k)
-
+    window.bind("X", "-CLOSE-")
+ 
     # Event Loop to process "events"
     while True:
         event, values = window.read(timeout=100)
-        if event == sg.WIN_CLOSED:  # if user closes window
+        if event == sg.WIN_CLOSED or event=='-CLOSE-':  # if user closes window
             print("Closing window")
             break
 
