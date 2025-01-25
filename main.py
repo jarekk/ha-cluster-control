@@ -16,9 +16,13 @@ from system_checks import check_mac
 from system_checks import check_docker_logs
 from system_checks import check_http
 from system_checks import ping_host
+from system_checks import check_victronmetrics
 import file_logging
 import pytz
+import gsm
 
+
+NONE_COLOR = "#64778d"
 
 app = Flask(__name__)
 
@@ -35,6 +39,7 @@ config.read('config.ini')
 
 localtz = pytz.timezone('Europe/Berlin')
 
+gsm = gsm.Gsm(config.get("GSM", "pin"), config.get("GSM", "recipient"), config.get("GSM", "device"))   
 
 # ----------------------------------------------------------------  
 # HTTP endpoints
@@ -106,6 +111,25 @@ def process_check_logs(queue, host, container, label):
 
         time.sleep(30)
 
+def process_check_victronmetrics(queue, host, label):
+    while True:
+        result = check_victronmetrics(host)
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result is not None, "metrics": result})
+
+        time.sleep(5)
+
+def process_check_gsm(queue, label):
+    time.sleep(15)
+    while True:
+        result = gsm.get_status()            
+        queue.put({"type": label, "time": datetime.now().astimezone(localtz), "result": result})
+
+        time.sleep(5)
+
+
+
+
+
 processes = None
 def setup_processes():            
     global processes
@@ -129,7 +153,15 @@ def setup_processes():
         multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_b'),"homeassistant","ha_logs_server_b")),
         multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_a'),"zigbee2mqtt","z2m_logs_server_a")),
         multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_logs_server_b")),
+        multiprocessing.Process(target=process_check_victronmetrics, args=(event_queue,config.get('IPs','victron'),"victron_metrics")),
         multiprocessing.Process(target=actions.action_runner, args=(actions.action_event_queue, event_queue)),
+    ]
+
+threads = None
+def setup_threads():
+    global threads
+    threads =  [
+        Thread(target=process_check_gsm, args=(event_queue, "gsm_status"), daemon=True),
     ]
 
 
@@ -188,11 +220,56 @@ def evaluate_event_with_status(event, secondary):
 
     return event
 
+def evaluate_victron(event):
+    if event["result"]:
+        metrics = event["metrics"]
+        if metrics:
+            event["mains"] = metrics["led_map"]["led_mains"] == "dot-green"
+            event["inverter"] = metrics["led_map"]["led_inverter"] == "dot-green"  
+
+            if not event["mains"]:
+                text = 'CRITICAL - Power fail (' + metrics["battery_charge"] + '}%)'
+                event["status"] = "CRITICAL"
+            else:
+                text = "OK (" + metrics['battery_charge'] + "%)"
+                event["status"] = "OK"
+
+            event["msg"] = text
+        else:
+            event["status"] = "MISSING"
+            event["msg"] = "MISSING - No metrics"
+    else:
+        event["status"] = "MISSING"
+        event["msg"] = "MISSING - Cannot fetch"
+
+    print ("Victron event: ", event)
+    return event
+
+def evaluate_gsm(event):
+    print("GSM event: ", event)
+    if event["result"]["signal"] > 0:
+        event["status"] = "OK"
+        event["msg"] = "OK - signal: " + str(event["result"]["signal"]) + "%, network: " + event["result"]["network"]
+    else:
+        event["status"] = "CRITICAL"        
+        
+    return event
+
 def get_gui_label(event):
     if event["type"] in check_configuration:
         c = check_configuration[event["type"]]
         if c is not None and isinstance(c, tuple):
             return c[0]
+        else:
+            return c
+    else:
+        return None
+    
+def get_notification_label(event):
+    if event["type"] in check_configuration:
+        c = check_configuration[event["type"]]
+        if c is not None and isinstance(c, tuple):
+            return c[1]
         else:
             return c
     else:
@@ -207,10 +284,12 @@ def evaluate_check(event, current_server):
         event = evaluate_event_with_status(event, secondary=None)
     elif event['type'] in ('ha_docker_server_b', 'z2m_docker_server_b'):
         event = evaluate_event_with_status(event, secondary=current_server!="secondary")   
-
     elif event['type'] == 'mac_cluster_id':
         event["status"] = "OK"        
-      
+    elif event['type'] == 'victron_metrics':
+        event = evaluate_victron(event)
+    elif event['type'] == 'gsm_status':
+        event = evaluate_gsm(event)
     elif event['type'] == 'action_result':
         update_last_action(event['result'])
 
@@ -227,10 +306,25 @@ def evaluate_event_turned_critical(event, last_event):
 
 
 def update_event_display(event, window, gui_label):
+    if event["type"] == "gsm_status":
+        window[gui_label].update(event["msg"], background_color="red" if event["status"] == "CRITICAL" else None)
+        return
+
+    if event["type"] == "victron_metrics":
+        if event["status"] == "OK":
+            text = event["msg"]
+            color = NONE_COLOR
+        elif event["status"] in ("CRITICAL", "MISSING"):
+            text = event["msg"]            
+            color = "red"
+
+        window[gui_label].update(text, background_color=color)
+        return
+
     if event["type"] in "mac_cluster_id":
         if event["result"] == "primary":
             text = "Primary"
-            color = None
+            color = NONE_COLOR
         elif event["result"] == "secondary":
             text = "Secondary"
             color = "yellow"
@@ -241,7 +335,9 @@ def update_event_display(event, window, gui_label):
         window[gui_label].update(text, background_color=color)
         return
 
-    color = None
+
+
+    color = NONE_COLOR
     if event["status"] in ("CRITICAL"):
         color = "red"
         text = "CRITICAL - " + event["time"].astimezone(localtz).strftime('%H:%M:%S')
@@ -269,6 +365,11 @@ def update_event_display(event, window, gui_label):
 
     window[gui_label].update(text, background_color=color)
 
+def notify_event(event, last_event):
+    if "changed_state" in event and event["changed_state"]:
+        text = get_notification_label(event) + " changed to " + event["status"]
+        gsm.send_sms(text)
+
 
 def process_event(event, window):    
     global current_server
@@ -281,15 +382,16 @@ def process_event(event, window):
         event["changed_state"] = True
 
     if event["type"] in last_check_by_type and evaluate_event_turned_critical(event, last_check_by_type[event["type"]]):
-        event["last_notification"] = datetime.now()
         event["turned_critical"] = True
+
+    notify_event(event, last_check_by_type[event["type"]] if event["type"] in last_check_by_type else None) 
 
     if get_gui_label(event):
         update_event_display(event, window, get_gui_label(event))
     else:
         print("No GUI label for event: ", event)
     
-    file_logging.log_event(event)
+    #file_logging.log_event(event)
 
     last_check_by_type[event["type"]] = event
 
@@ -306,7 +408,9 @@ infra_panel = [
     [sg.Text('Garden Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_GARDEN-', size=(20, 1))],
     [sg.Text('Backup Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_BACKUP-', size=(20, 1))],
     [sg.Text('Current HA:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_HA-', size=(20, 1))],
-    [sg.Text('Active server:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_KEEPALIVED-', size=(20, 1))]
+    [sg.Text('Active server:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_KEEPALIVED-', size=(20, 1))],
+    [sg.Text('UPS:', size=(15, 1)), sg.Text('', key='-VICTRON_METRICS-', size=(20, 1))],
+    [sg.Text('GSM:', size=(15, 1)), sg.Text('', key='-GSM_STATUS-', size=(20, 1))]
 ]
 
 # Define the layout for Server A and Server B panels
@@ -372,22 +476,24 @@ check_configuration = {
     'ping_main_switch': ('-INFRA_SWITCH_MAIN-', "Ping to main switch"),
     'ping_garden_switch': ('-INFRA_SWITCH_GARDEN-', "Ping to garden switch"),
     'ping_backup_switch': ('-INFRA_SWITCH_BACKUP-', "Ping to backup switch"),
-    'ping_server_a': '-A_LASTPING-',
-    'ping_server_b': '-B_LASTPING-',
-    'ha_request': '-INFRA_CURRENT_HA-',
-    'raid_server_a': '-A_RAID-',
-    'raid_server_b': '-B_RAID-',
-    'ha_docker_server_a': '-A_HA_DOCKER-',
-    'z2m_docker_server_a': '-A_Z2M_DOCKER-',
-    'ha_docker_server_b': '-B_HA_DOCKER-',
-    'z2m_docker_server_b': '-B_Z2M_DOCKER-',
-    'mac_cluster_id': '-INFRA_CURRENT_KEEPALIVED-',
-    'ha_logs_server_a': '-A_LASTMSG_HA-',
-    'ha_logs_server_b': '-B_LASTMSG_HA-',
-    'z2m_logs_server_a': '-A_LASTMSG_Z2M-',
-    'z2m_logs_server_b': '-B_LASTMSG_Z2M-',
+    'ping_server_a': ('-A_LASTPING-', "Ping to server A"),
+    'ping_server_b': ('-B_LASTPING-', "Ping to server B"),
+    'ha_request': ('-INFRA_CURRENT_HA-', "Current HA"),
+    'raid_server_a': ('-A_RAID-', "RAID on server A"),
+    'raid_server_b': ('-B_RAID-', "RAID on server B"),
+    'ha_docker_server_a': ('-A_HA_DOCKER-', "HA Docker on server A"),
+    'z2m_docker_server_a': ('-A_Z2M_DOCKER-', "Z2M Docker on server A"),
+    'ha_docker_server_b': ('-B_HA_DOCKER-', "HA Docker on server B"),
+    'z2m_docker_server_b': ('-B_Z2M_DOCKER-', "Z2M Docker on server B"),
+    'mac_cluster_id': ('-INFRA_CURRENT_KEEPALIVED-', "Current cluster IP"),
+    'ha_logs_server_a': ('-A_LASTMSG_HA-', "HA logs on server A"),
+    'ha_logs_server_b': ('-B_LASTMSG_HA-', "HA logs on server B"),
+    'z2m_logs_server_a': ('-A_LASTMSG_Z2M-', "Z2M logs on server A"),
+    'z2m_logs_server_b': ('-B_LASTMSG_Z2M-', "Z2M logs on server B"),
     'http_ping_received_server_a': '-A_LASTPING_HA-',
     'http_ping_received_server_b': '-B_LASTPING_HA-',
+    'victron_metrics': ('-VICTRON_METRICS-', "UPS"),
+    'gsm_status': ('-GSM_STATUS-', "GSM"),
 }
     
 # ----------------------------------------------------------------
@@ -460,11 +566,17 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
     setup_queues()
     setup_processes()
+    setup_threads()
+
     for process in processes:
         process.start()
+    for t in threads:
+        t.start()
 
     flask_thread.daemon = True
     flask_thread.start()
+
+    gsm.start()
 
     window.finalize()
     window.bind("E", "-RESTART_SERVER_B-")

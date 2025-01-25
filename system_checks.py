@@ -3,6 +3,9 @@ import subprocess
 import re
 from datetime import datetime
 import pytz
+import requests
+import websocket
+import json
 
 
 def ping_host(host):
@@ -99,3 +102,53 @@ def check_docker_logs(host, container):
         print(f"Error: {e}")
     
     return None
+
+
+def check_victronmetrics(host):
+    try:
+        ws = websocket.create_connection(f"ws://{host}:8080/ws")
+        request = {
+            "type": "get_metrics"
+        }
+        ws.send(json.dumps(request))
+
+        response = ws.recv()
+        #print("victron response: ", response)
+
+        ws.close()
+        return json.loads(response)
+
+    except Exception as e:
+        print(f"Victron Error: {e}")
+        return None
+
+def parse_metrics(text):
+    ALLOWED_METRICS = {
+        'battery_charge_percentage',
+        'battery_current_a',
+        'battery_power_w',
+        'battery_voltage_v',
+        'mains_current_in_a',
+        'mains_current_out_a',
+        'mains_freq_in_hz',
+        'mains_freq_out_hz',
+        'mains_power_in_va',
+        'mains_power_out_va',
+        'mains_voltage_in_v',
+        'mains_voltage_out_v'
+    }
+    metrics = {}
+    lines = text.split('\n')
+    for line in lines:
+        if line.startswith('# HELP'):
+            pass
+        elif line.startswith('# TYPE'):
+            pass
+        elif line != '':
+            parts = line.split(' ')
+            metric_name = parts[0]
+            metric_value = parts[1]
+            if metric_name in ALLOWED_METRICS:
+                metrics[metric_name][parts[0]] = metric_value
+
+    return metrics
