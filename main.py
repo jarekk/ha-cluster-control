@@ -242,7 +242,7 @@ def evaluate_victron(event):
         event["status"] = "MISSING"
         event["msg"] = "MISSING - Cannot fetch"
 
-    print ("Victron event: ", event)
+    #print ("Victron event: ", event)
     return event
 
 def evaluate_gsm(event):
@@ -252,6 +252,7 @@ def evaluate_gsm(event):
         event["msg"] = "OK - signal: " + str(event["result"]["signal"]) + "%, network: " + event["result"]["network"]
     else:
         event["status"] = "CRITICAL"        
+        event["msg"] = "CRITICAL, no signal"
         
     return event
 
@@ -277,9 +278,9 @@ def get_notification_label(event):
 
 def evaluate_check(event, current_server):    
     if event['type'] in ('ping_internet', 'ping_udm', 'ping_main_switch', 'ping_garden_switch', 'ping_backup_switch', 'ping_server_a', 'ping_server_b', 'ha_request'):
-        event = evaluate_event_with_time(event, 5, 1, secondary=None)
+        event = evaluate_event_with_time(event, 6, 3, secondary=None)
     elif event['type'] in ('ha_logs_server_a', 'ha_logs_server_b', 'z2m_logs_server_a', 'z2m_logs_server_b', 'http_ping_received_server_a', 'http_ping_received_server_b'):        
-        event = evaluate_event_with_time(event, 10, 5, secondary=None if event['type'] in ('ha_logs_server_a', 'z2m_logs_server_a', 'http_ping_received_server_a') else current_server!="secondary")
+        event = evaluate_event_with_time(event, 15, 7, secondary=None if event['type'] in ('ha_logs_server_a', 'z2m_logs_server_a', 'http_ping_received_server_a') else current_server!="secondary")
     elif event['type'] in ('raid_server_a', 'raid_server_b', 'ha_docker_server_a', 'z2m_docker_server_a'):
         event = evaluate_event_with_status(event, secondary=None)
     elif event['type'] in ('ha_docker_server_b', 'z2m_docker_server_b'):
@@ -291,7 +292,7 @@ def evaluate_check(event, current_server):
     elif event['type'] == 'gsm_status':
         event = evaluate_gsm(event)
     elif event['type'] == 'action_result':
-        update_last_action(event['result'])
+        event["status"] = "NONE"
 
     return event
 
@@ -366,9 +367,15 @@ def update_event_display(event, window, gui_label):
     window[gui_label].update(text, background_color=color)
 
 def notify_event(event, last_event):
-    if "changed_state" in event and event["changed_state"]:
-        text = get_notification_label(event) + " changed to " + event["status"]
+    if ("changed_state" in event and event["changed_state"]) or (event["type"] in ("action_invoked","action_result")):
+        if event["type"]=='action_invoked':
+            text = event["time"].astimezone(localtz).strftime('%d-%m %H:%M:%S: ') + event["result"]
+        elif event["type"]=='action_result':
+            text = event["time"].astimezone(localtz).strftime('%d-%m %H:%M:%S: ') + "Action finished: " + event["result"]
+        else:
+            text = event["time"].astimezone(localtz).strftime('%d-%m %H:%M:%S: ') + get_notification_label(event) + " changed to " + event["status"]
         gsm.send_sms(text)
+        window['-NOTIFICATIONS-'].print(text)
 
 
 def process_event(event, window):    
@@ -402,7 +409,7 @@ def process_event(event, window):
 
 infra_panel = [
     [sg.Text('    Infrastracture', size=(40, 1))],
-    [sg.Text('Internet:', size=(15, 1)), sg.Text('', key='-INFRA_INTERNET-', size=(20, 1))],
+    [sg.Text('Internet:', size=(15, 1)), sg.Text('', key='-INFRA_INTERNET-', size=(25, 1))],
     [sg.Text('Router:', size=(15, 1)), sg.Text('', key='-INFRA_ROUTER-', size=(20, 1))],
     [sg.Text('Main Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_MAIN-', size=(20, 1))],
     [sg.Text('Garden Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_GARDEN-', size=(20, 1))],
@@ -410,7 +417,10 @@ infra_panel = [
     [sg.Text('Current HA:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_HA-', size=(20, 1))],
     [sg.Text('Active server:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_KEEPALIVED-', size=(20, 1))],
     [sg.Text('UPS:', size=(15, 1)), sg.Text('', key='-VICTRON_METRICS-', size=(20, 1))],
-    [sg.Text('GSM:', size=(15, 1)), sg.Text('', key='-GSM_STATUS-', size=(20, 1))]
+    [sg.Text('GSM:', size=(15, 1)), sg.Text('', key='-GSM_STATUS-', size=(25, 1))],
+
+    [sg.Button('Restart Modem (T)', key='-RESTART_MODEM-', size=(30, 1))],
+
 ]
 
 # Define the layout for Server A and Server B panels
@@ -424,10 +434,13 @@ server_a_panel = [
     [sg.Text('Z2M Docker:', size=(15, 1)), sg.Text('', key='-A_Z2M_DOCKER-', size=(20, 1))],
     [sg.Text('RAID:', size=(15, 1)), sg.Text('', key='-A_RAID-', size=(20, 1))],
 
-
     [sg.Button('Restart Homeassistant (A)', key='-RESTART_HA_A-', size=(30, 1))],
     [sg.Button('Stop Homeassistant (B)', key='-STOP_HA_A-', size=(30, 1))],
     [sg.Button('Start Homeassistant (C)', key='-START_HA_A-', size=(30, 1))],
+    [sg.Button('Restart Z2M (D)', key='-RESTART_Z2M_A-', size=(30, 1))],
+    [sg.Button('Stop Z2M (E)', key='-STOP_Z2M_A-', size=(30, 1))],
+    [sg.Button('Start Z2M (F)', key='-START_Z2M_A-', size=(30, 1))],
+    [sg.Button('Restart server (G)', key='-RESTART_SERVER_A-', size=(30, 1))],
 ]
 
 server_b_panel = [
@@ -440,8 +453,13 @@ server_b_panel = [
     [sg.Text('Z2M Docker:', size=(15, 1)), sg.Text('', key='-B_Z2M_DOCKER-', size=(20, 1))],
     [sg.Text('RAID:', size=(15, 1)), sg.Text('', key='-B_RAID-', size=(20, 1))],
 
-    [sg.Button('Restart Homeassistant (D)', key='-RESTART_HA_B-', size=(30, 1))],
-    [sg.Button('Restart Server (E)', key='-RESTART_SERVER_B-', size=(30, 1))]    
+    [sg.Button('Restart Homeassistant (J)', key='-RESTART_HA_B-', size=(30, 1))],
+    [sg.Button('Stop Homeassistant (K)', key='-STOP_HA_B-', size=(30, 1))],
+    [sg.Button('Start Homeassistant (L)', key='-START_HA_B-', size=(30, 1))],
+    [sg.Button('Restart Z2M (M)', key='-RESTART_Z2M_B-', size=(30, 1))],
+    [sg.Button('Stop Z2M (N)', key='-STOP_Z2M_A-', size=(30, 1))],
+    [sg.Button('Start Z2M (O)', key='-START_Z2M_A-', size=(30, 1))],
+    [sg.Button('Restart server (P)', key='-RESTART_SERVER_B-', size=(30, 1))],
 ]
 
 
@@ -462,12 +480,32 @@ layout = [
     [sg.vtop(sg.Column(infra_panel, element_justification='l')),
      sg.vtop(sg.Column(server_a_panel, element_justification='l')),
      sg.vtop(sg.Column(server_b_panel, element_justification='l'))],
-    [sg.Text('Last action: ', size=(15, 1)), sg.Text('', key='-LAST_ACTION-', size=(100, 1))]
+    [sg.Multiline(key='-NOTIFICATIONS-', size=(200, 20), background_color=NONE_COLOR, text_color="white")]
 ]
 layout = top_align_layout(layout)
 
 # Create the Window
 window = sg.Window('Cluster Control', layout, size=(1280, 1024))
+
+button_mapping = {
+    '-RESTART_MODEM-': ('T', "Restart internet modem", ("restart_modem", "")),
+    
+    '-RESTART_HA_A-': ('A', "Restart Homeassistant on server A", ("restart_ha", config.get('IPs','server_a'))),
+    '-STOP_HA_A-': ('B', "Stop Homeassistant on server A", ("stop_ha", config.get('IPs','server_a'))),
+    '-START_HA_A-': ('C', "Start Homeassistant on server A", ("start_ha", config.get('IPs','server_a'))),
+    '-RESTART_Z2M_A-': ('D', "Restart Z2M on server A", ("restart_z2m", config.get('IPs','server_a'))),
+    '-STOP_Z2M_A-': ('E', "Stop Z2M on server A", ("stop_z2m", config.get('IPs','server_a'))),
+    '-START_Z2M_A-': ('F', "Start Z2M on server A", ("start_z2m", config.get('IPs','server_a'))),
+    '-RESTART_SERVER_A-': ('G', "Restart server A", ("restart_server", config.get('IPs','server_a'))),
+    
+    '-RESTART_HA_B-': ('J', "Restart Homeassistant on server B",  ("restart_ha", config.get('IPs','server_b'))),
+    '-STOP_HA_B-': ('K', "Stop Homeassistant on server B", ("stop_ha", config.get('IPs','server_b'))),
+    '-START_HA_B-': ('L', "Start Homeassistant on server B", ("start_ha", config.get('IPs','server_b'))),
+    '-RESTART_Z2M_B-': ('M', "Restart Z2M on server B", ("restart_z2m", config.get('IPs','server_b'))),
+    '-STOP_Z2M_B-': ('N', "Stop Z2M on server B", ("stop_z2m", config.get('IPs','server_b'))),
+    '-START_Z2M_B-': ('O', "Start Z2M on server B", ("start_z2m", config.get('IPs','server_b'))),
+    '-RESTART_SERVER_B-': ('P', "Restart server B", ("restart_server", config.get('IPs','server_b'))),
+}
 
 
 check_configuration = {
@@ -559,9 +597,6 @@ def update_label_with_status_docker_b_server(label, time, status, current_server
     else:
         window[label].update('UP - ' + time.astimezone(localtz).strftime('%H:%M:%S'))
 
-def update_last_action(text):
-    window['-LAST_ACTION-'].update(text + " - " + datetime.now().astimezone(localtz).strftime('%H:%M:%S'))
-
 if __name__ == '__main__':  
     multiprocessing.freeze_support()
     setup_queues()
@@ -579,8 +614,8 @@ if __name__ == '__main__':
     gsm.start()
 
     window.finalize()
-    window.bind("E", "-RESTART_SERVER_B-")
-
+    for k in button_mapping:        
+        window.bind(button_mapping[k][0], k)
 
     # Event Loop to process "events"
     while True:
@@ -588,27 +623,12 @@ if __name__ == '__main__':
         if event == sg.WIN_CLOSED:  # if user closes window
             print("Closing window")
             break
-        if event.startswith('-RESTART_HA_A-'):
-            # Handle the button press for restarting Homeassistant on Server A
-            # Add your code here
-            print("Restarting Homeassistant on Server A")
-        elif event.startswith('-STOP_HA_A-'):
-            # Handle the button press for stopping Homeassistant on Server A
-            # Add your code here
-            print("Restarting Homeassistant on Server A")
-        elif event.startswith('-START_HA_A-'):
-            # Handle the button press for starting Homeassistant on Server A
-            # Add your code here
-            print("Restarting Homeassistant on Server A")
-        elif event.startswith('-RESTART_HA_B-'):
-            # Handle the button press for restarting Homeassistant on Server B
-            # Add your code here
-            print("Restarting Homeassistant on Server A")
-        elif event.startswith('-RESTART_SERVER_B-'):
-            if confirmation_popup.show_popup("restart Server B"):
-                update_last_action("Restarting Server B")
-                actions.invoke_action({"type": "restart_server", "ip": config.get('IPs','server_b')})
-       
+
+        if event in button_mapping:
+            if confirmation_popup.show_popup(button_mapping[event][1]):
+                notify_event({"type": "action_invoked", "time":  datetime.now().astimezone(localtz), "result": "Action started: " + button_mapping[event][1]}, None)
+                actions.invoke_action(button_mapping[event][2])
+
         if not event_queue.empty():
             process_event(event_queue.get(), window)    
 
