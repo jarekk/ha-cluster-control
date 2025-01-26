@@ -171,17 +171,39 @@ def setup_threads():
 
 last_check_by_type = {}
 current_server = None
+event_last_success = {}
 
 def evaluate_event_with_time(event, threshold_red, threshold_yellow, secondary):
     if not event["result"]:
         if event["time"] is None:
             event["time"] = datetime.now()
 
-        if secondary is not None and secondary:
-            event["status"] = "ERROR_INACTIVE"
+        if event["type"] in event_last_success:
+            time = event_last_success[event["type"]] 
+            time_difference = datetime.now().astimezone(localtz) - time
+            minutes = time_difference.total_seconds() // 60
+            if minutes > threshold_red:
+                if secondary is not None and secondary:
+                    event["status"] = "CRITICAL_INACTIVE"
+                else:
+                    event["status"] = "CRITICAL"
+            elif minutes > threshold_yellow:
+                if secondary is not None and secondary:
+                    event["status"] = "WARNING_INACTIVE"
+                else:
+                    event["status"] = "WARNING"
+            else:
+                event["status"] = "OK" 
+
         else:
-            event["status"] = "ERROR"   
+            if secondary is not None and secondary:
+                event["status"] = "ERROR_INACTIVE"
+            else:
+                event["status"] = "ERROR"   
+
         return event
+    
+
 
     time = event["time"]
     if time is not None:
@@ -199,6 +221,7 @@ def evaluate_event_with_time(event, threshold_red, threshold_yellow, secondary):
                 event["status"] = "WARNING"
         else:
             event["status"] = "OK" 
+            event_last_success[event["type"]] = time
     else:
         if secondary is not None and secondary:
             event["status"] = "MISSING_INACTIVE"
@@ -207,16 +230,28 @@ def evaluate_event_with_time(event, threshold_red, threshold_yellow, secondary):
 
     return event
 
-def evaluate_event_with_status(event, secondary):
+event_count_failures = {}
+
+def evaluate_event_with_status(event, secondary, critical_treshold):
     if event["result"] is not None:
-        if secondary is not None and secondary:
-            event["status"] = "CRITICAL_INACTIVE"
+
+        if event["type"] in event_count_failures:
+            event_count_failures[event["type"]] += 1
         else:
-            event["status"] = "CRITICAL"
+            event_count_failures[event["type"]] = 1
+
+        if event_count_failures[event["type"]] > critical_treshold:
+            if secondary is not None and secondary:
+                event["status"] = "CRITICAL_INACTIVE"
+            else:
+                event["status"] = "CRITICAL"
+        else:
+            event["status"] = "OK"
         
         event["msg"] = event["result"]  
     else:
         event["status"] = "OK"
+        event_count_failures[event["type"]] = 0
 
     return event
 
@@ -280,11 +315,11 @@ def evaluate_check(event, current_server):
     if event['type'] in ('ping_internet', 'ping_udm', 'ping_main_switch', 'ping_garden_switch', 'ping_backup_switch', 'ping_server_a', 'ping_server_b', 'ha_request'):
         event = evaluate_event_with_time(event, 6, 3, secondary=None)
     elif event['type'] in ('ha_logs_server_a', 'ha_logs_server_b', 'z2m_logs_server_a', 'z2m_logs_server_b', 'http_ping_received_server_a', 'http_ping_received_server_b'):        
-        event = evaluate_event_with_time(event, 15, 7, secondary=None if event['type'] in ('ha_logs_server_a', 'z2m_logs_server_a', 'http_ping_received_server_a') else current_server!="secondary")
+        event = evaluate_event_with_time(event, 10, 5, secondary=None if event['type'] in ('ha_logs_server_a', 'z2m_logs_server_a', 'http_ping_received_server_a') else current_server!="secondary")
     elif event['type'] in ('raid_server_a', 'raid_server_b', 'ha_docker_server_a', 'z2m_docker_server_a'):
-        event = evaluate_event_with_status(event, secondary=None)
+        event = evaluate_event_with_status(event, secondary=None, critical_treshold=5)
     elif event['type'] in ('ha_docker_server_b', 'z2m_docker_server_b'):
-        event = evaluate_event_with_status(event, secondary=current_server!="secondary")   
+        event = evaluate_event_with_status(event, secondary=current_server!="secondary", critical_treshold=5)   
     elif event['type'] == 'mac_cluster_id':
         event["status"] = "OK"        
     elif event['type'] == 'victron_metrics':
@@ -494,7 +529,7 @@ button_mapping = {
     '-STOP_HA_A-': ('B', "Stop Homeassistant on server A", ("stop_ha", config.get('IPs','server_a'))),
     '-START_HA_A-': ('C', "Start Homeassistant on server A", ("start_ha", config.get('IPs','server_a'))),
     '-RESTART_Z2M_A-': ('D', "Restart Z2M on server A", ("restart_z2m", config.get('IPs','server_a'))),
-    '-STOP_Z2M_A-': ('E', "Stop Z2M on server A", ("stop_z2m", config.get('IPs','server_a'))),
+    '-STOP_Z2M_A-': ('H', "Stop Z2M on server A", ("stop_z2m", config.get('IPs','server_a'))),
     '-START_Z2M_A-': ('F', "Start Z2M on server A", ("start_z2m", config.get('IPs','server_a'))),
     '-RESTART_SERVER_A-': ('G', "Restart server A", ("restart_server", config.get('IPs','server_a'))),
     
