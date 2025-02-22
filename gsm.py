@@ -7,8 +7,11 @@ class Gsm:
     def __init__(self, pin, notify_number, device):        
         self.pin = pin
         self.notify_number = notify_number
-        self.modem = GsmModem(device, 115200)
-        self.modem.smsTextMode = False # use PDU mode
+        if device is not None:
+            self.modem = GsmModem(device, 115200)
+            self.modem.smsTextMode = False # use PDU mode
+        else:
+            self.modem = None
         self.queue = queue.Queue()
         self.signalStrength = 0
         self.networkName = ""
@@ -20,6 +23,9 @@ class Gsm:
 
 
     def run(self):
+        if self.modem is None:            
+            return
+        
         self.modem.connect(self.pin)
         while True:
             try:

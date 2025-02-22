@@ -17,6 +17,7 @@ from system_checks import check_docker_logs
 from system_checks import check_http
 from system_checks import ping_host
 from system_checks import check_victronmetrics
+import internet
 import file_logging
 import pytz
 import gsm
@@ -39,7 +40,9 @@ config.read('config.ini')
 
 localtz = pytz.timezone('Europe/Berlin')
 
-gsm = gsm.Gsm(config.get("GSM", "pin"), config.get("GSM", "recipient"), config.get("GSM", "device"))   
+
+device = config.get("GSM", "device") if config.has_option("GSM", "device") else None
+gsm = gsm.Gsm(config.get("GSM", "pin"), config.get("GSM", "recipient"), device)
 
 # ----------------------------------------------------------------  
 # HTTP endpoints
@@ -126,7 +129,24 @@ def process_check_gsm(queue, label):
 
         time.sleep(5)
 
+def process_internet_check(queue):
+    time.sleep(3)
+    backup_count = 0
+    while True:
+        result = internet.check_backup_internet()
+        if "BACKUP" in result:
+            backup_count+=1            
+        else:
+            backup_count = 0
 
+        queue.put({"type": "internet", "time": datetime.now().astimezone(localtz), "result": result, "backup_count": backup_count})
+
+        now = datetime.now().astimezone(localtz)
+        if backup_count>=3 and result == "BACKUP_PASS_INACTIVE" and not (0 <= now.hour < 6 or (now.hour == 6 and now.minute < 30)):            
+            result = internet.book_internet_pass()
+            queue.put({"type": "internet-purchase", "time": datetime.now().astimezone(localtz), "result": result})      
+
+        time.sleep(30)  
 
 
 
@@ -154,6 +174,7 @@ def setup_processes():
         multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_a'),"zigbee2mqtt","z2m_logs_server_a")),
         multiprocessing.Process(target=process_check_logs, args=(event_queue,config.get('IPs','server_b'),"zigbee2mqtt","z2m_logs_server_b")),
         multiprocessing.Process(target=process_check_victronmetrics, args=(event_queue,config.get('IPs','victron'),"victron_metrics")),
+        multiprocessing.Process(target=process_internet_check, args=(event_queue,)),
         multiprocessing.Process(target=actions.action_runner, args=(actions.action_event_queue, event_queue)),
     ]
 
@@ -328,6 +349,15 @@ def evaluate_check(event, current_server):
         event = evaluate_gsm(event)
     elif event['type'] == 'action_result':
         event["status"] = "NONE"
+    elif event['type'] == 'internet':
+        if "PRIMARY" in event["result"]:
+            event["status"] = "OK"
+            event["msg"] = "OK - Primary internet"
+        else:
+            event["status"] = "CRITICAL"
+            event["msg"] = "CRITICAL - LTE internet"
+    elif event['type'] == 'internet-purchase':                
+        event["status"] = "OK"
 
     return event
 
@@ -426,12 +456,19 @@ def process_event(event, window):
     if event["type"] in last_check_by_type and evaluate_event_turned_critical(event, last_check_by_type[event["type"]]):
         event["turned_critical"] = True
 
-    notify_event(event, last_check_by_type[event["type"]] if event["type"] in last_check_by_type else None) 
+
+    if event["type"] == "internet-purchase":
+        text="Internet backup purchased: " + event["result"]
+        gsm.send_sms(text)
+        window['-NOTIFICATIONS-'].print(text) 
+    else:
+        notify_event(event, last_check_by_type[event["type"]] if event["type"] in last_check_by_type else None) 
 
     if get_gui_label(event):
         update_event_display(event, window, get_gui_label(event))
     else:
-        print("No GUI label for event: ", event)
+        if event["type"] not in ("internet-purchase"):
+            print("No GUI label for event: ", event)
     
     #file_logging.log_event(event)
 
@@ -443,8 +480,9 @@ def process_event(event, window):
 # ----------------------------------------------------------------
 
 infra_panel = [
-    [sg.Text('    Infrastracture', size=(40, 1))],
+    [sg.Text('    Infrastructure', size=(40, 1))],
     [sg.Text('Internet:', size=(15, 1)), sg.Text('', key='-INFRA_INTERNET-', size=(25, 1))],
+    [sg.Text('Internet Provider:', size=(15, 1)), sg.Text('', key='-INFRA_INTERNET_PROVIDER-', size=(25, 1))],
     [sg.Text('Router:', size=(15, 1)), sg.Text('', key='-INFRA_ROUTER-', size=(20, 1))],
     [sg.Text('Main Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_MAIN-', size=(20, 1))],
     [sg.Text('Garden Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_GARDEN-', size=(20, 1))],
@@ -454,7 +492,7 @@ infra_panel = [
     [sg.Text('UPS:', size=(15, 1)), sg.Text('', key='-VICTRON_METRICS-', size=(20, 1))],
     [sg.Text('GSM:', size=(15, 1)), sg.Text('', key='-GSM_STATUS-', size=(25, 1))],
 
-    [sg.Button('Restart Modem (T)', key='-RESTART_MODEM-', size=(30, 1))],
+    [sg.Button('Restart Cable Modem (T)', key='-RESTART_MODEM-', size=(30, 1))],
 
 ]
 
@@ -567,6 +605,7 @@ check_configuration = {
     'http_ping_received_server_b': '-B_LASTPING_HA-',
     'victron_metrics': ('-VICTRON_METRICS-', "UPS"),
     'gsm_status': ('-GSM_STATUS-', "GSM"),
+    'internet' : ('-INFRA_INTERNET_PROVIDER-', "Internet provider"),    
 }
     
 # ----------------------------------------------------------------
