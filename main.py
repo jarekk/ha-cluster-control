@@ -1,4 +1,4 @@
-import PySimpleGUI as sg
+import FreeSimpleGUI as sg
 from flask import Flask
 from datetime import datetime
 from threading import Thread
@@ -489,7 +489,7 @@ infra_panel = [
     [sg.Text('Backup Switch:', size=(15, 1)), sg.Text('', key='-INFRA_SWITCH_BACKUP-', size=(20, 1))],
     [sg.Text('Current HA:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_HA-', size=(20, 1))],
     [sg.Text('Active server:', size=(15, 1)), sg.Text('', key='-INFRA_CURRENT_KEEPALIVED-', size=(20, 1))],
-    [sg.Text('UPS:', size=(15, 1)), sg.Text('', key='-VICTRON_METRICS-', size=(20, 1))],
+    [sg.Text('UPS:', size=(15, 1)), sg.Text('', key='-VICTRON_METRICS-', size=(25, 1))],
     [sg.Text('GSM:', size=(15, 1)), sg.Text('', key='-GSM_STATUS-', size=(25, 1))],
 
     [sg.Button('Restart Cable Modem (T)', key='-RESTART_MODEM-', size=(30, 1))],
