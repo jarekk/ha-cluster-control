@@ -22,7 +22,7 @@ def check_backup_internet():
         product_container = None
 
         for container in soup.find_all("p"):
-            if "das Mobilfunknetz notwendig" in container.get_text():
+            if "das Mobilfunknetz notwendig" in container.get_text() or "over the mobile network" in container.get_text():
                 return "PRIMARY"
 
         for container in soup.find_all("section", class_="data-pass-instance"):
@@ -129,6 +129,7 @@ def book_internet_pass():
         # Step 7: Submit the form using a POST request with the form data
         form_response = requests.post(form_action, data=form_data, verify=False)
         form_response.raise_for_status()
+
         print("Successfully submitted the form with 'Zahlungspflichtig bestellen'")
         print("Status Code:", form_response.status_code)
         print("\nResponse content snippet:")
@@ -140,3 +141,15 @@ def book_internet_pass():
         print("An error occurred while accessing the page:")
         print(e)
         return "ERROR"
+
+if __name__ == "__main__":
+    print("Checking backup internet status...")
+    status = check_backup_internet()
+    print("Status:", status)
+    
+    if status == "BACKUP_PASS_INACTIVE":
+        print("\nBooking the internet pass...")
+        result = book_internet_pass()
+        print("Booking result:", result)
+    else:
+        print("\nNo action required. Backup internet is already active.")
